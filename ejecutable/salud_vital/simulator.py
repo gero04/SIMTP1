@@ -36,8 +36,12 @@ class SimuladorCentroVacunacion(InterfazSimulador):
         self.fila_anterior: Optional[Dict[str, Any]] = None
         self.filas_visibles: List[Dict[str, Any]] = []
         self.fila_final: Optional[Dict[str, Any]] = None
+        self.max_objetos_visibles = 0
+        self.persona_evento_actual: Optional[Persona] = None
+        self.estado_evento_actual: Optional[str] = None
         self.ultimo_rnd_llegada: Optional[float] = None
         self.ultimo_tiempo_entre_llegadas: Optional[float] = None
+        self.vacunaciones_por_puesto: Dict[str, int] = {"P1": 0, "P2": 0}
         self.ultimos_aleatorios_evento: Dict[str, Optional[float]] = {
             "rnd_llegada": None,
             "t_entre_llegadas": None,
@@ -63,6 +67,7 @@ class SimuladorCentroVacunacion(InterfazSimulador):
         self.reloj = self.configuracion.tiempo_simulacion
         self._cerrar_bloqueos_abiertos()
         self._tomar_snapshot(self.FIN_SIMULACION, forzar_final=True)
+        self._normalizar_columnas_objetos()
         self._destruir_objetos_de_ejecucion()
         return self.filas_visibles
 
@@ -76,6 +81,8 @@ class SimuladorCentroVacunacion(InterfazSimulador):
             "bloqueo_promedio_puestos": bloqueo_total / len(self.puestos),
             "bloqueo_p1": self.puestos[0].tiempo_bloqueo_acumulado,
             "bloqueo_p2": self.puestos[1].tiempo_bloqueo_acumulado,
+            "vacunaciones_p1": self.vacunaciones_por_puesto["P1"],
+            "vacunaciones_p2": self.vacunaciones_por_puesto["P2"],
             "permanencia_promedio": self.estadisticas.permanencia_promedio,
         }
 
@@ -97,6 +104,8 @@ class SimuladorCentroVacunacion(InterfazSimulador):
         persona = Persona(self.proximo_id_persona, self.reloj)
         self.proximo_id_persona += 1
         self.estadisticas.llegadas += 1
+        self.persona_evento_actual = persona
+        self.estado_evento_actual = "Llegada"
 
         rnd, tiempo_entre_llegadas = self.variable_llegada.muestrear()
         self.ultimo_rnd_llegada = rnd
@@ -119,6 +128,8 @@ class SimuladorCentroVacunacion(InterfazSimulador):
         if puesto.estado != EstadoPuesto.OCUPADO:
             return
 
+        self.persona_evento_actual = puesto.persona_actual
+        self.estado_evento_actual = "Vacunacion"
         if len(self.observacion) >= self.configuracion.capacidad_observacion:
             puesto.bloquear(self.reloj)
             return
@@ -130,6 +141,8 @@ class SimuladorCentroVacunacion(InterfazSimulador):
 
     def _manejar_fin_observacion(self, persona: Persona) -> None:
         self.observacion.pop(persona.id_persona, None)
+        self.persona_evento_actual = persona
+        self.estado_evento_actual = "Fin"
         self.estadisticas.completadas += 1
         self.estadisticas.permanencia_acumulada += self.reloj - persona.tiempo_llegada
         self._intentar_desbloquear_puestos()
@@ -153,6 +166,7 @@ class SimuladorCentroVacunacion(InterfazSimulador):
     def _iniciar_vacunacion(self, puesto: PuestoVacunacion, persona: Persona) -> None:
         rnd, duracion = self.variable_vacunacion.muestrear()
         puesto.iniciar_vacunacion(persona, self.reloj, rnd, duracion)
+        self.vacunaciones_por_puesto[puesto.nombre] += 1
         clave_rnd = "rnd_vac_p1" if puesto.nombre == "P1" else "rnd_vac_p2"
         clave_tiempo = "t_vac_p1" if puesto.nombre == "P1" else "t_vac_p2"
         self.ultimos_aleatorios_evento[clave_rnd] = rnd
@@ -160,6 +174,7 @@ class SimuladorCentroVacunacion(InterfazSimulador):
         self._agregar_evento(puesto.proximo_fin_tiempo, 2, self.FIN_VACUNACION, puesto)
 
     def _enviar_a_observacion(self, persona: Persona) -> None:
+        persona.inicio_observacion = self.reloj
         persona.fin_observacion = self.reloj + self.configuracion.tiempo_observacion
         self.observacion[persona.id_persona] = (persona.fin_observacion, persona)
         self._agregar_evento(persona.fin_observacion, 3, self.FIN_OBSERVACION, persona)
@@ -195,12 +210,14 @@ class SimuladorCentroVacunacion(InterfazSimulador):
             self.filas_visibles.append(fila)
         if forzar_final:
             self.fila_final = fila
+        self.persona_evento_actual = None
+        self.estado_evento_actual = None
 
     def _construir_fila_estado(self, nombre_evento: str) -> Dict[str, Any]:
         proxima_llegada = self._proximo_tiempo_evento(self.LLEGADA)
         proximo_fin_observacion = self._proximo_tiempo_evento(self.FIN_OBSERVACION)
         puesto_1, puesto_2 = self.puestos
-        return {
+        fila = {
             "iteracion": self.iteracion,
             "reloj_min": round(self.reloj, 4),
             "evento": nombre_evento,
@@ -227,6 +244,78 @@ class SimuladorCentroVacunacion(InterfazSimulador):
             "porc_rechazo": round(self.estadisticas.porcentaje_rechazo, 4),
             "prom_permanencia": round(self.estadisticas.permanencia_promedio, 4),
         }
+        self._agregar_columnas_objetos(fila)
+        return fila
+
+    def _agregar_columnas_objetos(self, fila: Dict[str, Any]) -> None:
+        objetos = self._obtener_objetos_activos()
+        self.max_objetos_visibles = max(self.max_objetos_visibles, len(objetos))
+        for indice, persona in enumerate(objetos, start=1):
+            prefijo = f"obj_{indice:02d}"
+            fila[f"{prefijo}_id"] = f"{persona.id_persona} {self._estado_persona(persona)}"
+            fila[f"{prefijo}_inicio_vac"] = self._formatear(persona.inicio_vacunacion)
+            fila[f"{prefijo}_inicio_obs"] = self._formatear(persona.inicio_observacion)
+            fila[f"{prefijo}_fin_atencion"] = self._formatear(persona.fin_observacion)
+            fila[f"{prefijo}_total"] = self._total_persona(persona)
+
+    def _obtener_objetos_activos(self) -> List[Persona]:
+        objetos: List[Persona] = []
+        ids_agregados: set[int] = set()
+
+        for puesto in self.puestos:
+            if puesto.persona_actual is None or puesto.persona_actual.id_persona in ids_agregados:
+                continue
+            objetos.append(puesto.persona_actual)
+            ids_agregados.add(puesto.persona_actual.id_persona)
+
+        for persona in self.cola:
+            if persona.id_persona in ids_agregados:
+                continue
+            objetos.append(persona)
+            ids_agregados.add(persona.id_persona)
+
+        for _, persona in sorted(self.observacion.values(), key=lambda item: item[0]):
+            if persona.id_persona in ids_agregados:
+                continue
+            objetos.append(persona)
+            ids_agregados.add(persona.id_persona)
+
+        if self.persona_evento_actual is not None and self.persona_evento_actual.id_persona not in ids_agregados:
+            objetos.append(self.persona_evento_actual)
+            ids_agregados.add(self.persona_evento_actual.id_persona)
+
+        return objetos
+
+    def _normalizar_columnas_objetos(self) -> None:
+        if self.max_objetos_visibles == 0:
+            return
+        for fila in self.filas_visibles:
+            for indice in range(1, self.max_objetos_visibles + 1):
+                prefijo = f"obj_{indice:02d}"
+                fila.setdefault(f"{prefijo}_id", None)
+                fila.setdefault(f"{prefijo}_inicio_vac", None)
+                fila.setdefault(f"{prefijo}_inicio_obs", None)
+                fila.setdefault(f"{prefijo}_fin_atencion", None)
+                fila.setdefault(f"{prefijo}_total", None)
+
+    def _estado_persona(self, persona: Persona) -> str:
+        if self.persona_evento_actual is not None and persona.id_persona == self.persona_evento_actual.id_persona and self.estado_evento_actual == "Fin":
+            return "Fin"
+        if any(
+            puesto.persona_actual is not None and puesto.persona_actual.id_persona == persona.id_persona
+            for puesto in self.puestos
+        ):
+            return "Vacunacion"
+        if persona.id_persona in self.observacion:
+            return "Observacion"
+        if any(persona_cola.id_persona == persona.id_persona for persona_cola in self.cola):
+            return "Cola"
+        return self.estado_evento_actual or "Sistema"
+
+    def _total_persona(self, persona: Persona) -> Optional[float]:
+        if persona.fin_observacion is None:
+            return None
+        return round(persona.fin_observacion - persona.tiempo_llegada, 4)
 
     def _proximo_tiempo_evento(self, tipo_evento: str) -> Optional[float]:
         tiempos = [evento.time for evento in self.eventos if evento.tipo_evento == tipo_evento]

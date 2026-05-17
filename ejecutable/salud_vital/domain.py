@@ -17,8 +17,10 @@ class Persona:
     id_persona: int # Identificador de la persona
     tiempo_llegada: float # Momento en el que la persona llega al sistema
     inicio_vacunacion: Optional[float] = None # Momento en el que la empiezan a vacunar
+    inicio_observacion: Optional[float] = None # Momento en el que entra a observacion
     fin_vacunacion: Optional[float] = None # Momento en el que la terminan de vacunar (es None si no lo hicieron)
     fin_observacion: Optional[float] = None # Momento en el que termina la observacion (es None si no termino)
+    puesto_vacunacion: Optional[str] = None # Puesto donde se vacuno
 
 # Representa a un puesto de vacunacion con estados 
 @dataclass
@@ -39,6 +41,7 @@ class PuestoVacunacion:
     def iniciar_vacunacion(self, persona: Persona, reloj: float, rnd: float, duracion: float) -> None:
         persona.inicio_vacunacion = reloj
         persona.fin_vacunacion = reloj + duracion
+        persona.puesto_vacunacion = self.nombre
         self.persona_actual = persona
         self.estado = EstadoPuesto.OCUPADO
         self.proximo_fin_tiempo = persona.fin_vacunacion
